@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+output/
+*.pt
+*.mp4
+*.mkv
+*.avi
+scripts/debug_output.txt
+scripts/debug_results.txt
+scripts/debug_results_copy.txt
+scripts/debug_stanley.txt
+scripts/bottles_*.txt
+scripts/pipeline_output.txt
+.venv/
+venv/
+env/
