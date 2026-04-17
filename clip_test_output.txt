@@ -1,0 +1,3 @@
+yellow_box      | raw: 0.240 | prompt: 0.243
+door_shadow     | raw: 0.220 | prompt: 0.205
+actual_broom    | raw: 0.234 | prompt: 0.229

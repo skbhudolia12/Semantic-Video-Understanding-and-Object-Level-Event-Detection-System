@@ -21,7 +21,7 @@ def main():
     parser.add_argument("--video", required=True, help="Path to the input video file.")
     parser.add_argument("--query", default=None, help="Natural language query (e.g. 'red car').")
     parser.add_argument("--conf", type=float, default=0.25, help="YOLO confidence threshold.")
-    parser.add_argument("--sim", type=float, default=0.20, help="CLIP similarity threshold.")
+    parser.add_argument("--sim", type=float, default=0.25, help="CLIP similarity threshold.")
     parser.add_argument("--fps", type=float, default=2.0, help="Sampling FPS.")
     parser.add_argument("--compliance", action="store_true", help="Run compliance checks.")
     parser.add_argument("--save-frames", action="store_true", help="Save annotated frames to output/frames/.")
@@ -48,10 +48,12 @@ def main():
 
         # Try YOLO-based matching first
         yolo_matched = False
+        final_matches = []
         if args.query and detections:
             matches = match_crops(args.query, detections, threshold=args.sim)
             if matches:
                 yolo_matched = True
+                final_matches.extend(matches)
                 match_timestamps.append(timestamp)
                 best = max(matches, key=lambda m: m["similarity"])
                 color = best.get('color', '')
@@ -61,22 +63,25 @@ def main():
         # Fallback: CLIP sliding window scan when YOLO misses
         clip_dets = []
         if args.query and not yolo_matched:
-            clip_dets = clip_scan(frame, args.query, threshold=0.24)
+            clip_dets = clip_scan(frame, args.query, threshold=0.28)
             if clip_dets:
+                final_matches.extend(clip_dets)
                 match_timestamps.append(timestamp)
                 best = max(clip_dets, key=lambda d: d["similarity"])
                 print(f"  [{timestamp:.1f}s] CLIP match: {best['color']} {best['label']} "
                       f"(sim={best['similarity']:.3f})")
 
-        # Merge all detections for tracking
+        # Merge all detections for tracking (compliance needs context)
         all_dets = detections + clip_dets
         tracker.add(timestamp, all_dets)
 
-        # Draw bounding boxes on frame
-        if all_dets and frames_dir:
-            annotated = draw_detections(frame.copy(), all_dets)
-            fname = os.path.join(frames_dir, f"frame_{timestamp:.1f}s.jpg")
-            cv2.imwrite(fname, annotated)
+        # Draw bounding boxes on frame (only draw matches if querying)
+        if frames_dir:
+            draw_list = final_matches if args.query else all_dets
+            if draw_list:
+                annotated = draw_detections(frame.copy(), draw_list)
+                fname = os.path.join(frames_dir, f"frame_{timestamp:.1f}s.jpg")
+                cv2.imwrite(fname, annotated)
 
     # --- Results ---
     print("\n[3/5] Results")

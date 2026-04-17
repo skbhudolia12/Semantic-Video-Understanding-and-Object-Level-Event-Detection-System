@@ -54,28 +54,28 @@ def detect_objects(model, frame, conf_threshold=0.25):
     return detections
 
 
-def clip_scan(frame, query, threshold=0.24, grid_size=(6, 8), scales=(0.15, 0.10, 0.08)):
+def clip_scan(frame, query, threshold=0.25, grid_size=(6, 8), scales=(0.15, 0.10, 0.08)):
     """
     Sliding-window CLIP scan to find objects YOLO missed.
-
-    Scans the frame with overlapping windows at multiple scales,
-    scores each window against the query, and returns high-scoring regions.
-
-    Args:
-        frame: BGR numpy array.
-        query: Text query string.
-        threshold: Minimum CLIP similarity to report.
-        grid_size: (rows, cols) grid density.
-        scales: Window sizes as fractions of frame dimensions.
-
-    Returns:
-        List of detection dicts with keys: bbox, label, confidence, color, crop, similarity.
+    Uses Zero-Shot classification against negative prompts to suppress background noise.
     """
     from src.models.clip_model import encode_text, encode_image
     import torch
 
     h, w = frame.shape[:2]
-    query_emb = encode_text(query)
+    
+    # Positive and negative prompts for verification
+    query_text = f"a photo of a {query}"
+    negatives = [
+        "a photo of a plain background", 
+        "a photo of a wall", 
+        "a photo of a floor", 
+        "a photo of a shadow",
+        "a photo of furniture"
+    ]
+    all_texts = [query_text] + negatives
+    text_embs = torch.stack([encode_text(t).squeeze() for t in all_texts])
+    query_emb = text_embs[0].unsqueeze(0)
 
     candidates = []
 
@@ -93,14 +93,24 @@ def clip_scan(frame, query, threshold=0.24, grid_size=(6, 8), scales=(0.15, 0.10
             for x in range(0, w - win_w + 1, step_x):
                 crop = frame[y:y + win_h, x:x + win_w]
                 img_emb = encode_image(crop)
+                
+                # Check base similarity
                 sim = float(torch.nn.functional.cosine_similarity(query_emb, img_emb))
 
+                # Use a slightly lower base threshold (0.25) so we let zero-shot filtering do the heavy lifting
                 if sim >= threshold:
-                    candidates.append({
-                        "bbox": [x, y, x + win_w, y + win_h],
-                        "similarity": sim,
-                        "crop": crop,
-                    })
+                    # Zero-shot verification
+                    sims = torch.nn.functional.cosine_similarity(text_embs, img_emb.expand(len(all_texts), -1))
+                    probs = (100.0 * sims).softmax(dim=0)
+                    
+                    # If the query is the most likely class, or has >40% probability among negatives
+                    if probs[0] > 0.40:
+                        candidates.append({
+                            "bbox": [x, y, x + win_w, y + win_h],
+                            "similarity": sim,
+                            "prob": float(probs[0]),
+                            "crop": crop,
+                        })
 
     # Non-max suppression: keep only the best among overlapping boxes
     candidates.sort(key=lambda c: c["similarity"], reverse=True)
@@ -109,7 +119,7 @@ def clip_scan(frame, query, threshold=0.24, grid_size=(6, 8), scales=(0.15, 0.10
         if not any(_iou(cand["bbox"], k["bbox"]) > 0.4 for k in kept):
             color = get_dominant_color(cand["crop"])
             cand["label"] = query
-            cand["confidence"] = cand["similarity"]
+            cand["confidence"] = cand["prob"]  # Use probability as confidence!
             cand["color"] = color
             kept.append(cand)
 
