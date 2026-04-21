@@ -13,15 +13,18 @@ def stream_frames(video_path, sample_fps=1):
         (frame, timestamp) where frame is a BGR numpy array and
         timestamp is the time in seconds.
     """
+    if isinstance(video_path, str) and video_path.isdigit():
+        video_path = int(video_path)
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {video_path}")
 
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0:
-        raise ValueError("Could not determine video FPS.")
+        video_fps = 30.0  # Default to 30 FPS for webcams if not reported by cap
 
-    frame_interval = int(video_fps / sample_fps)
+    frame_interval = max(1, int(video_fps / sample_fps))
     frame_idx = 0
 
     while True:
