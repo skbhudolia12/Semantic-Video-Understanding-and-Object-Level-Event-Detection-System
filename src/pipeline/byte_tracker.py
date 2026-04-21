@@ -74,15 +74,15 @@ class TrackerModule:
         track_thresh: float = 0.25,
         track_buffer: int = 30,
         match_thresh: float = 0.8,
-        frame_rate: int = 2,
+        frame_rate: int = 5,
     ):
         sv = _import_supervision()
 
         # ByteTrack is supervision's built-in multi-object tracker
-        self._tracker = sv.ByteTracker(
-            track_thresh=track_thresh,
-            track_buffer=track_buffer,
-            match_thresh=match_thresh,
+        self._tracker = sv.ByteTrack(
+            track_activation_threshold=track_thresh,
+            lost_track_buffer=track_buffer,
+            minimum_matching_threshold=match_thresh,
             frame_rate=frame_rate,
         )
         self._sv = sv
@@ -199,7 +199,7 @@ class TrackerModule:
     def reset(self) -> None:
         """Reset the tracker state (e.g. at a scene cut)."""
         sv = self._sv
-        self._tracker = sv.ByteTracker()
+        self._tracker = sv.ByteTrack()
         self._track_history.clear()
         logger.debug("TrackerModule reset.")
 

@@ -373,6 +373,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fps",           type=float, default=2.0,  help="Sampling FPS.")
     parser.add_argument("--compliance",    action="store_true",  help="Run compliance checks.")
     parser.add_argument("--save-frames",   action="store_true",  help="Save annotated frames to output/frames/.")
+    parser.add_argument("--show",          action="store_true",  help="Display real-time video feed via open CV.")
     # --- New flags ---
     parser.add_argument("--no-tracker",    action="store_true",  help="Disable ByteTrack multi-object tracker.")
     parser.add_argument("--no-context",    action="store_true",  help="Disable semantic segmentation context filter.")
@@ -424,18 +425,30 @@ def main():
                 "confidence": result.violation_confidence,
             })
 
-        # Persist annotated frame
-        if frames_dir and (result.matches or not args.query):
+        # Compute annotated frame if saving or showing
+        if (frames_dir or args.show) and (result.matches or not args.query):
             draw_list = result.matches if args.query else result.all_detections
             if draw_list:
                 annotated = draw_detections(frame.copy(), draw_list)
+            else:
+                annotated = frame.copy()
+                
+            if frames_dir:
                 fname = frames_dir / f"frame_{timestamp:.1f}s.jpg"
                 cv2.imwrite(str(fname), annotated)
+                
+            if args.show:
+                cv2.imshow("Semantic Video Pipeline", annotated)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    logger.info("Real-time feed stopped by user.")
+                    break
 
     # -------------------------------------------------------------------
     # End-of-video: fine-tune MLP compliance checker
     # -------------------------------------------------------------------
     pipeline.finalize()
+    if args.show:
+        cv2.destroyAllWindows()
 
     # -------------------------------------------------------------------
     # Print results
