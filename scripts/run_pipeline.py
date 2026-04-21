@@ -61,7 +61,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import cv2
 
@@ -71,7 +71,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.models.yolo_model import load_yolo
 from src.pipeline.video_stream import stream_frames
-from src.pipeline.detector import detect_objects, draw_detections, clip_scan
+from src.pipeline.detector import detect_objects, draw_detections
 from src.pipeline.matcher import match_crops
 from src.pipeline.tracker import DetectionTracker
 from src.pipeline.aggregator import aggregate_segments
@@ -201,8 +201,6 @@ class HybridPipeline:
                     "Falling back to rule-based.", exc
                 )
 
-        # --- Spatial-temporal heatmap for Tier-2 (persisted between frames) ---
-        self._clip_heatmap: Dict[Tuple, float] = {}
 
     # ------------------------------------------------------------------
     # Core frame processing
@@ -244,9 +242,7 @@ class HybridPipeline:
             self.yolo, frame, conf_threshold=self.conf_threshold
         )
 
-        yolo_matched = False
         final_matches: List[dict] = []
-        clip_dets: List[dict] = []
         tier_used = "none"
 
         if query and raw_detections:
@@ -254,37 +250,18 @@ class HybridPipeline:
                 query,
                 raw_detections,
                 threshold=self.sim_threshold,
-                attribute_matching=self.attribute_matching,   # NEW: attr expansion
+                attribute_matching=self.attribute_matching,
             )
             if matches:
-                yolo_matched = True
                 final_matches.extend(matches)
                 tier_used = "yolo"
                 best = max(matches, key=lambda m: m["similarity"])
                 logger.info(
-                    "  [%.1fs] YOLO match: %s %s (sim=%.3f)",
-                    timestamp, best.get("color", ""), best["label"], best["similarity"],
+                    "  [%.1fs] YOLO match: %s (sim=%.3f)",
+                    timestamp, best["label"], best["similarity"],
                 )
 
-        # ------ Step 2: Tier-2 — Batched ONNX sliding window (fallback) --
-        if query and not yolo_matched:
-            clip_dets, self._clip_heatmap = clip_scan(
-                frame,
-                query,
-                threshold=self.sim_threshold + 0.03,   # slightly higher for fallback
-                prev_heatmap=self._clip_heatmap,       # carry heatmap across frames
-            )
-            if clip_dets:
-                final_matches.extend(clip_dets)
-                tier_used = "clip_scan"
-                best = max(clip_dets, key=lambda d: d["similarity"])
-                logger.info(
-                    "  [%.1fs] CLIP match: %s %s (sim=%.3f)",
-                    timestamp, best.get("color", ""), best["label"], best["similarity"],
-                )
-
-        # Merge all detections for tracking and compliance
-        all_dets = raw_detections + clip_dets
+        all_dets = raw_detections
 
         # ------ Step 3: ByteTrack — assign stable track IDs --------------
         if self.byte_tracker is not None and all_dets:
@@ -468,7 +445,7 @@ def main():
         for ts, dets in pipeline.detection_tracker.get_all():
             if dets:
                 items = [
-                    f"{d.get('color','')} {d['label']}"
+                    f"{d['label']}"
                     f"{' T#'+str(d['track_id']) if d.get('track_id', -1) != -1 else ''}"
                     for d in dets
                 ]

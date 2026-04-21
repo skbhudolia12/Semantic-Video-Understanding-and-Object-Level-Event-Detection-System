@@ -304,3 +304,130 @@ input[type="text"]:focus {
   font-size: 0.75rem;
   color: var(--text-secondary);
 }
+
+/* Rule input row */
+.rule-input-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.icon-btn {
+  flex-shrink: 0;
+  padding: 0.75rem;
+  width: 2.5rem;
+  height: 2.5rem;
+}
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Rule list inside left panel */
+.rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding-right: 2px;
+}
+
+.rule-item {
+  border-left: 3px solid var(--primary-accent);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 4px 6px 6px 4px;
+  padding: 0.5rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.82rem;
+  animation: slideIn 0.2s ease-out;
+}
+.rule-item.parsing {
+  opacity: 0.6;
+}
+
+.rule-item-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.rule-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+
+.rule-label {
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rule-id-badge {
+  font-family: monospace;
+  font-size: 0.7rem;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.rule-original {
+  font-size: 0.74rem;
+  color: var(--text-secondary);
+  padding-left: 1.2rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rule-remove {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0.1rem;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+}
+.rule-remove:hover {
+  color: var(--danger-accent);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+/* Global violation badge in header */
+.global-violation-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--danger-accent);
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-left: auto;
+}
+
+/* Spinner animation */
+.spin {
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}

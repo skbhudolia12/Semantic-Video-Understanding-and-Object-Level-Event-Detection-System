@@ -1,106 +1,215 @@
-# Semantic Video Understanding & Object-Level Event Detection System
+# Semantic Video Understanding and Object-Level Event Detection System
 
-A high-performance pipeline architecture combining real-time object detection, open-vocabulary semantic attributes matching, visual tracking, and event compliance monitoring. 
+This project combines classical video processing with modern vision-language models for two main workflows:
 
-It provides both a legacy CLI module and a highly dynamic, glassmorphic Web Application dashboard for live streaming.
+1. Offline video search and compliance checks from the CLI.
+2. A live web dashboard for webcam or uploaded-video monitoring with natural-language rules.
 
-## Features & Architecture
+At a high level the system uses YOLO for object detection, CLIP for semantic verification, optional ByteTrack IDs for object continuity, an optional semantic context filter, and a rule engine that can evaluate plain-English conditions such as "person on a bike without a helmet".
 
-This system uses a **Tiered Hybrid Pipeline** to guarantee fast, state-of-the-art accuracy leveraging multiple foundational models:
+## Current Project Structure
 
-1. **Tier-1 YOLOv8 + CLIP Attribute Matching**: Uses YOLOv8 for rapid object bounding box extraction. If a text query is provided, crops are projected into the CLIP embedding space to determine cosine similarity (e.g., query "red backpack").
-2. **Tier-2 Batched ONNX CLIP Scanning**: Serves as a dynamic fallback if Tier-1 detects nothing. Performs sliding-window frame analysis strictly on regions indicated by a persistent Spatial-Temporal Heatmap, bypassing standard PyTorch overhead.
-3. **ByteTrack Multi-Object Tracking**: Wraps the `supervision` ByteTrack API to maintain stable tracker IDs across sequential frames even under transient occlusion.
-4. **DeepLabV3 Context Filter**: Eliminates absurd or physically impossible detections by running semantic segmentation on the entire scene (e.g., rejecting a "car" predicted floating in the "sky").
-5. **Neural Compliance Checker**: Upgrades from hard-coded heuristics to an iterative, dynamic Multi-Layer Perceptron (MLP) capable of learning custom compliance violations on-the-fly iteratively after 50 tracked data samples.
+```text
+src/
+  models/
+    clip_model.py
+    onnx_clip_encoder.py
+    yolo_model.py
+  pipeline/
+    aggregator.py
+    byte_tracker.py
+    compliance.py
+    context_filter.py
+    detector.py
+    matcher.py
+    neural_compliance.py
+    reasoning.py
+    rule_engine.py
+    rule_parser.py
+    tracker.py
+    video_stream.py
+  server/
+    app.py
+scripts/
+  run_pipeline.py
+  export_clip_onnx.py
+  debug_detections.py
+tests/
+ui/
+start_server.bat
+```
 
----
+## Main Components
 
-## 💻 The Web Dashboard
+### CLI pipeline
 
-Alongside the CLI, this project runs an interactive, dual-server Web Application featuring real-time stream displays and tracking logs:
+The CLI entrypoint is [scripts/run_pipeline.py](scripts/run_pipeline.py). It builds a `HybridPipeline` that:
 
-- **Backend (FastAPI)**: Found in `src/server/app.py`. Streams an MJPEG stream locally, and transmits pipeline Object IDs securely via **WebSockets**.
-- **Frontend (Vite + React)**: Found in `ui/`. Programmed entirely via Vanilla CSS ensuring a premium, glassmorphic dark-mode appearance and instantaneous event logging.
+- samples frames from a video with `stream_frames()`
+- runs YOLO detection
+- optionally matches detections against a natural-language query with CLIP
+- optionally attaches ByteTrack IDs
+- optionally tags detections with semantic scene validity
+- records detection history for reasoning and compliance summaries
 
----
+This path is useful for offline experiments, debugging, and batch-style video analysis.
 
-## 🛠️ Installation & Setup
+### Web backend
 
-We recommend utilizing an active virtual environment.
+The FastAPI server lives in [src/server/app.py](src/server/app.py). It provides:
+
+- `POST /upload` for local video uploads
+- `GET /video_feed/{stream_id}` for an MJPEG stream
+- `GET /rules`, `POST /rules`, and `DELETE /rules/{rule_id}` for rule management
+- `WS /ws/stats/{stream_id}` for live per-frame detection and rule results
+
+The backend reuses `HybridPipeline` for base detections, then augments detections for rule evaluation with CLIP-based verification and rule-specific matching.
+
+### Natural-language rules
+
+The rule flow is:
+
+1. A user enters plain English in the dashboard.
+2. [src/pipeline/rule_parser.py](src/pipeline/rule_parser.py) sends that text to OpenAI and converts it into a structured `ParsedRule`.
+3. [src/pipeline/rule_engine.py](src/pipeline/rule_engine.py) evaluates the parsed rule against each frame's detections.
+4. Matching or violating rules are drawn on the stream and pushed to the UI over WebSockets.
+
+Rule parser logs are written to `output/gpt_rule_log.jsonl` during local runs.
+
+### Frontend
+
+The React dashboard is in [ui/](ui/). The main screen is [ui/src/App.jsx](ui/src/App.jsx) and it:
+
+- uploads a file or uses webcam input
+- creates and deletes live rules
+- opens the backend MJPEG stream
+- listens to WebSocket updates
+- shows active rules and an event log in real time
+
+## Environment Setup
+
+### Python
+
+Python 3.10+ is recommended.
+
+Create and activate a virtual environment:
 
 ```bash
-# 1. Clone the repository and initialize virtualenv
-cd Semantic-Video-Understanding-and-Object-Level-Event-Detection-System
-python3 -m venv .venv
+python -m venv .venv
+```
+
+Windows:
+
+```bash
+.venv\Scripts\activate
+```
+
+macOS/Linux:
+
+```bash
 source .venv/bin/activate
+```
 
-# 2. Install Python Pipeline Dependencies
-pip install -r requirements.txt
-pip install fastapi uvicorn python-multipart websockets
+Install the main Python dependencies:
 
-# 3. Setup the UI Frontend module
+```bash
+pip install ultralytics opencv-python torch torchvision numpy pillow
+pip install fastapi uvicorn python-multipart openai python-dotenv
+pip install clip-by-openai supervision onnxruntime
+```
+
+Notes:
+
+- `supervision` is needed for ByteTrack support.
+- `onnxruntime` is used by the ONNX CLIP image encoder path.
+- `clip-by-openai` provides the `clip` Python module imported by the project.
+
+### Frontend
+
+Use Node.js 18+.
+
+```bash
 cd ui
 npm install
 ```
 
----
+### Environment variables
 
-## 🚀 Usage
+Create a local `.env` file from `.env.example` and provide your key:
 
-You can interface with the model using either the CLI or Web Dashboard.
-
-### Method A: Web Interface (Recommended)
-
-Requires two active terminals initializing both the pipeline streaming endpoint and React application.
-
-**Terminal 1 (Backend API):**
-```bash
-source .venv/bin/activate
-uvicorn src.server.app:app --host 0.0.0.0 --port 8000
+```env
+OPENAI_API_KEY=your_openai_api_key_here
 ```
-**Terminal 2 (Frontend UI):**
+
+The server loads `.env` automatically on startup. Do not commit your local `.env`.
+
+## Running the Project
+
+### Option 1: Web dashboard
+
+Start the backend:
+
+Windows:
+
+```bat
+start_server.bat
+```
+
+Or directly:
+
+```bash
+python -m uvicorn src.server.app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Start the frontend in a second terminal:
+
 ```bash
 cd ui
-export PATH="/opt/homebrew/bin:$PATH"
 npm run dev
 ```
 
-Browse to `http://localhost:5173/`. Utilize the dashboard to connect seamlessly to your Mac's camera stream (`--video 0`) or seamlessly upload an offline video. 
-
-### Method B: Native CLI Command
-
-```bash
-source .venv/bin/activate
-python scripts/run_pipeline.py \
-  --video path_to_video.MOV \
-  --fps 30 \
-  --query "person with a helmet" \
-  --compliance \
-  --show
-```
-*Appending `--show` projects the native OpenCV local window popup.*
-
----
-
-## 📁 Directory Structure
+Then open:
 
 ```text
-├── src/
-│   ├── pipeline/
-│   │   ├── detector.py          # YOLO & CLIP Tier Models
-│   │   ├── byte_tracker.py      # Supervision multi-tracking wrapper
-│   │   ├── context_filter.py    # Torchvision semantic layer
-│   │   ├── neural_compliance.py # Dynamic Rules Engine
-│   │   └── matcher.py           # Embeddings and query logic
-│   └── server/
-│       └── app.py               # FastAPI MJPEG wrapper
-├── scripts/
-│   └── run_pipeline.py          # CLI orchestrator script
-├── ui/
-│   ├── src/                     # React application logic and sockets
-│   └── package.json    
-└── output/
-    ├── frames/                  # Default CLI debug export target
-    └── pipeline_results.txt
+http://localhost:5173
 ```
+
+### Option 2: CLI pipeline
+
+Example:
+
+```bash
+python scripts/run_pipeline.py ^
+  --video path_to_video.mp4 ^
+  --query "person with a helmet" ^
+  --fps 2 ^
+  --compliance ^
+  --show
+```
+
+Useful flags:
+
+- `--no-tracker`
+- `--no-context`
+- `--neural-compliance`
+- `--attribute-matching`
+- `--save-frames`
+
+## Tests
+
+Run the Python test suite with:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Local Artifacts
+
+These are intentionally local-only and ignored by Git:
+
+- `.env`
+- `.claude/`
+- `output/`
+- `models/`
+
+That keeps secrets, generated checkpoints, logs, and temporary outputs out of GitHub.

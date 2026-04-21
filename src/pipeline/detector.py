@@ -38,7 +38,6 @@ import cv2
 import numpy as np
 import torch
 
-from src.utils.color_utils import get_dominant_color
 
 
 # ---------------------------------------------------------------------------
@@ -72,11 +71,7 @@ def detect_objects(model, frame: np.ndarray, conf_threshold: float = 0.25) -> Li
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
         label = results.names[int(box.cls[0])]
 
-        # Tight crop for color detection (unchanged)
-        tight_crop = frame[y1:y2, x1:x2]
-        color = get_dominant_color(tight_crop)
-
-        # Padded crop for CLIP context — 25% padding (unchanged)
+        # Padded crop for CLIP context — 25% padding
         bw, bh = x2 - x1, y2 - y1
         pad_x, pad_y = int(bw * 0.25), int(bh * 0.25)
         cx1 = max(0, x1 - pad_x)
@@ -89,7 +84,6 @@ def detect_objects(model, frame: np.ndarray, conf_threshold: float = 0.25) -> Li
             "bbox":       [x1, y1, x2, y2],
             "label":      label,
             "confidence": conf,
-            "color":      color,
             "crop":       clip_crop,
         })
 
@@ -274,54 +268,52 @@ def _iou(box1: list, box2: list) -> float:
     return inter / union if union > 0 else 0
 
 
-# --- Bounding box color palette (BGR) — unchanged ---
-_BOX_COLORS = {
-    "red":    (0, 0, 255),
-    "green":  (0, 180, 0),
-    "blue":   (255, 100, 0),
-    "yellow": (0, 230, 255),
-    "orange": (0, 140, 255),
-    "purple": (200, 0, 180),
-    "pink":   (180, 105, 255),
-    "cyan":   (255, 255, 0),
-    "brown":  (19, 69, 139),
-    "black":  (80, 80, 80),
-    "white":  (220, 220, 220),
-    "gray":   (160, 160, 160),
-}
+_BOX_BGR = (99, 102, 241)   # indigo — matches the UI accent colour
+_DIM_BGR = (60, 60, 60)     # dim gray for background detections
+
+
+def draw_rule_results(
+    frame: np.ndarray,
+    detections: List[dict],
+    rule_matches: list,
+) -> np.ndarray:
+    for match in rule_matches:
+        if not match.matched:
+            continue
+        color = match.color_bgr
+        rule_label = f"[{match.rule_id}] {match.display_label}"
+
+        groups = getattr(match, "matched_groups", None) or [match.matched_bboxes]
+        for group in groups:
+            for i, bbox in enumerate(group):
+                x1, y1, x2, y2 = bbox
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+                # Primary bbox in each group gets the full label; supporting objects get rule_id only
+                text = rule_label if i == 0 else match.rule_id
+                font, font_scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2
+                (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
+                ty = max(y1 - 8, th + 6)
+                cv2.rectangle(frame, (x1, ty - th - 6), (x1 + tw + 6, ty + 2), color, -1)
+                cv2.putText(frame, text, (x1 + 3, ty - 3),
+                            font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+    return frame
 
 
 def draw_detections(frame: np.ndarray, detections: List[dict]) -> np.ndarray:
-    """
-    Draw bounding boxes with labels on a frame.
-
-    Each box shows: [color label confidence] [track_id if present]
-    e.g. [red car 0.91] [T#3]
-
-    Args:
-        frame: BGR numpy array (will be modified in place).
-        detections: List of detection dicts from detect_objects.
-
-    Returns:
-        The annotated frame.
-    """
+    """Draw bounding boxes with labels on a frame."""
     for det in detections:
         x1, y1, x2, y2 = det["bbox"]
-        label = det["label"]
-        conf  = det["confidence"]
-        color = det.get("color", "unknown")
+        label    = det["label"]
+        conf     = det["confidence"]
         track_id = det.get("track_id")
         ctx_valid = det.get("context_valid", True)
 
-        # Dim the box colour if context filter flagged this detection
-        box_bgr = _BOX_COLORS.get(color, (0, 255, 0))
-        if not ctx_valid:
-            box_bgr = tuple(int(c * 0.4) for c in box_bgr)  # darker = suspicious
+        box_bgr = tuple(int(c * 0.4) for c in _BOX_BGR) if not ctx_valid else _BOX_BGR
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), box_bgr, 2)
 
-        # Build label text — include track ID when available
-        text = f"{color} {label} {conf:.2f}"
+        text = f"{label} {conf:.2f}"
         if track_id is not None and track_id != -1:
             text += f" T#{track_id}"
         if not ctx_valid:
@@ -331,10 +323,7 @@ def draw_detections(frame: np.ndarray, detections: List[dict]) -> np.ndarray:
         (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
         ty = max(y1 - 6, th + 4)
         cv2.rectangle(frame, (x1, ty - th - 4), (x1 + tw + 4, ty + 2), box_bgr, -1)
-
-        brightness = sum(box_bgr) / 3
-        text_color = (0, 0, 0) if brightness > 140 else (255, 255, 255)
         cv2.putText(frame, text, (x1 + 2, ty - 2), font, font_scale,
-                    text_color, thickness, cv2.LINE_AA)
+                    (255, 255, 255), thickness, cv2.LINE_AA)
 
     return frame

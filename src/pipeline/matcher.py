@@ -35,24 +35,14 @@ Usage
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import torch
 
 from src.models.clip_model import encode_text, encode_image
-from src.utils.color_utils import get_dominant_color
 
-
-# ---------------------------------------------------------------------------
-# Colour vocabulary (must match _hsv_to_color_name return values)
-# ---------------------------------------------------------------------------
-_COLOUR_WORDS = {
-    "red", "orange", "yellow", "green", "cyan", "blue",
-    "purple", "pink", "brown", "black", "white", "gray", "grey",
-}
-
-# Sub-query weights: [full_query, core_noun, colour_description]
-_ATTRIBUTE_WEIGHTS = [0.60, 0.25, 0.15]
+# Sub-query weights: [full_query, core_noun]
+_ATTRIBUTE_WEIGHTS = [0.70, 0.30]
 
 
 # ---------------------------------------------------------------------------
@@ -97,34 +87,14 @@ def _label_boost(query: str, label: str, base_sim: float) -> float:
 # New: Attribute Expansion helpers
 # ---------------------------------------------------------------------------
 
-def _extract_colour_from_query(query: str) -> Optional[str]:
-    """Return the first colour word found in the query, or None."""
-    tokens = re.findall(r"\w+", query.lower())
-    for tok in tokens:
-        if tok in _COLOUR_WORDS:
-            return tok
-    return None
-
-
 def _build_sub_queries(query: str) -> Tuple[List[str], List[float]]:
     """
-    Decompose a free-text query into a weighted list of sub-queries.
-
-    Strategy:
-      1. Full query — highest weight, captures relational semantics.
-      2. Core noun phrase — strip interaction verbs (holding, carrying, using,
-         wearing, near, with) and prepositions to get the object noun.
-      3. Colour-context description — "a {colour} {noun}" or generic fallback.
-
-    Returns
-    -------
-    sub_queries : List[str]   — CLIP prompt strings
-    weights     : List[float] — parallel weights (sum to 1.0)
+    Decompose a free-text query into two weighted sub-queries:
+      1. Full query  (0.70) — captures relational semantics.
+      2. Core noun   (0.30) — strips interaction verbs for robustness.
     """
-    # --- Sub-query 1: full query (prepend CLIP-style prefix) ---
     full_q = f"a photo of a {query}"
 
-    # --- Sub-query 2: strip interaction verbs / prepositions ---
     _STRIP_PATTERNS = [
         r"\b(holding|carrying|wearing|using|near|with|next to|beside|on)\b",
     ]
@@ -134,58 +104,9 @@ def _build_sub_queries(query: str) -> Tuple[List[str], List[float]]:
     core = re.sub(r"\s+", " ", core).strip()
     core_q = f"a photo of a {core}" if core else full_q
 
-    # --- Sub-query 3: colour + object ---
-    colour = _extract_colour_from_query(query)
-    # Very naive noun extraction: last 1-2 non-colour, non-verb tokens
-    tokens = [t for t in re.findall(r"\w+", core) if t not in _COLOUR_WORDS]
-    noun = " ".join(tokens[-2:]) if tokens else core
-    if colour and noun:
-        colour_q = f"a photo of a {colour} {noun}"
-    else:
-        colour_q = full_q
-
-    sub_queries = [full_q, core_q, colour_q]
-    weights = _ATTRIBUTE_WEIGHTS[:]
-
-    # De-duplicate: if sub-queries are identical collapse their weights
-    seen: dict = {}
-    deduped_q, deduped_w = [], []
-    for q, w in zip(sub_queries, weights):
-        if q in seen:
-            deduped_w[seen[q]] += w
-        else:
-            seen[q] = len(deduped_q)
-            deduped_q.append(q)
-            deduped_w.append(w)
-
-    # Renormalise weights
-    total = sum(deduped_w)
-    deduped_w = [w / total for w in deduped_w]
-
-    return deduped_q, deduped_w
-
-
-def _colour_confirmation_bonus(
-    query: str, detected_color: str, base_sim: float
-) -> float:
-    """
-    If the query specifies a colour AND the HSV detector agrees, add a small
-    confirmation bonus.  If they disagree (query says red, detector says blue),
-    apply a small penalty.
-
-    This keeps the robust HSV pipeline integrated instead of relying solely on
-    CLIP's sometimes-inconsistent colour sensitivity.
-    """
-    query_colour = _extract_colour_from_query(query)
-    if query_colour is None:
-        return base_sim  # no colour in query — nothing to do
-
-    if detected_color == query_colour:
-        return base_sim + 0.04   # confirmed match
-    if detected_color not in ("unknown", "gray"):
-        # A clear *different* colour was detected → small penalty
-        return base_sim - 0.03
-    return base_sim
+    if full_q == core_q:
+        return [full_q], [1.0]
+    return [full_q, core_q], _ATTRIBUTE_WEIGHTS[:]
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +170,7 @@ def match_crops(
             # Original: single cosine similarity (backward-compatible)
             sim = compute_similarity(query_embs[0], img_emb)
 
-        # --- Original YOLO label semantic boost (unchanged) ---
         sim = _label_boost(query, det.get("label", ""), sim)
-
-        # --- NEW: HSV colour confirmation bonus ---
-        detected_color = det.get("color", "unknown")
-        sim = _colour_confirmation_bonus(query, detected_color, sim)
 
         if sim >= threshold:
             det_copy = {k: v for k, v in det.items() if k != "crop"}
