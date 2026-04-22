@@ -11,8 +11,8 @@ env/
 .env
 .claude/
 
-output/
-models/
+/output/
+/models/
 
 ui/node_modules/
 ui/dist/
