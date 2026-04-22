@@ -31,6 +31,7 @@ from src.pipeline.open_vocab_memory import (
     OpenVocabTrackStore,
     needs_open_vocab_verifier,
     rule_world_prompt,
+    secondary_open_vocab_terms,
 )
 from src.pipeline.rule_engine import RuleEngine
 
@@ -53,6 +54,8 @@ _COCO_CLASSES = {
 # Per-rule CLIP text embedding cache (avoids re-encoding every frame)
 _clip_text_cache: Dict[str, torch.Tensor] = {}
 _OPEN_VOCAB_STRIDE_SECONDS = 0.27
+_AUXILIARY_MAX_PRIMARIES = 4
+_HEAD_WEAR_TERMS = {"helmet", "hat", "cap", "hard hat"}
 
 
 def _clip_augment_detections(
@@ -209,6 +212,186 @@ def _open_vocab_stride_frames(fps: float) -> int:
     return max(8, int(round(max(fps, 1.0) * _OPEN_VOCAB_STRIDE_SECONDS)))
 
 
+def _bbox_iou(a: List[int], b: List[int]) -> float:
+    x1 = max(a[0], b[0])
+    y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2])
+    y2 = min(a[3], b[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    area_a = max(0, a[2] - a[0]) * max(0, a[3] - a[1])
+    area_b = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _nearby(a: List[int], b: List[int], proximity: float = 1.5) -> bool:
+    if _bbox_iou(a, b) > 0.05:
+        return True
+    ax = (a[0] + a[2]) / 2.0
+    ay = (a[1] + a[3]) / 2.0
+    bx = (b[0] + b[2]) / 2.0
+    by = (b[1] + b[3]) / 2.0
+    dist = ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+    diag_a = ((a[2] - a[0]) ** 2 + (a[3] - a[1]) ** 2) ** 0.5
+    diag_b = ((b[2] - b[0]) ** 2 + (b[3] - b[1]) ** 2) ** 0.5
+    return dist < proximity * max(diag_a, diag_b)
+
+
+def _expand_bbox(bbox: List[int], frame_shape: tuple[int, int, int], scale_x: float, scale_y: float) -> List[int]:
+    h, w = frame_shape[:2]
+    x1, y1, x2, y2 = bbox
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    pad_x = int(round(bw * scale_x))
+    pad_y = int(round(bh * scale_y))
+    return [
+        max(0, x1 - pad_x),
+        max(0, y1 - pad_y),
+        min(w, x2 + pad_x),
+        min(h, y2 + pad_y),
+    ]
+
+
+def _auxiliary_roi_for_term(
+    frame: np.ndarray,
+    primary_bbox: List[int],
+    primary_label: str,
+    term: str,
+) -> Tuple[List[int], np.ndarray] | None:
+    label = (primary_label or "").lower().strip()
+    term = (term or "").lower().strip()
+    x1, y1, x2, y2 = primary_bbox
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+
+    if label == "person" and term in _HEAD_WEAR_TERMS:
+        roi = [
+            max(0, x1 - int(round(bw * 0.15))),
+            max(0, y1 - int(round(bh * 0.28))),
+            min(frame.shape[1], x2 + int(round(bw * 0.15))),
+            min(frame.shape[0], y1 + int(round(bh * 0.42))),
+        ]
+    else:
+        roi = _expand_bbox(primary_bbox, frame.shape, scale_x=0.45, scale_y=0.25)
+
+    rx1, ry1, rx2, ry2 = roi
+    if rx2 <= rx1 or ry2 <= ry1:
+        return None
+
+    crop = frame[ry1:ry2, rx1:rx2]
+    if crop.size == 0:
+        return None
+    return roi, crop
+
+
+def _candidate_primaries_for_rule(rule: object, detections: List[dict]) -> List[dict]:
+    prox = getattr(rule, "proximity", 1.5)
+    primary_dets = [d for d in detections if _primary_matches(d.get("label", ""), rule.primary)]
+    if not primary_dets:
+        return []
+
+    available_required_terms = [
+        req for req in (getattr(rule, "required_nearby", []) or [])
+        if any(_primary_matches(det.get("label", ""), req) for det in detections)
+    ]
+    if not available_required_terms:
+        return primary_dets[:_AUXILIARY_MAX_PRIMARIES]
+
+    narrowed: List[dict] = []
+    for primary in primary_dets:
+        if all(
+            any(
+                _primary_matches(det.get("label", ""), req)
+                and _nearby(primary["bbox"], det["bbox"], prox)
+                for det in detections
+            )
+            for req in available_required_terms
+        ):
+            narrowed.append(primary)
+
+    return (narrowed or primary_dets)[:_AUXILIARY_MAX_PRIMARIES]
+
+
+def _merge_auxiliary_hit(
+    target: List[dict],
+    label: str,
+    bbox: List[int],
+    confidence: float,
+    crop: np.ndarray,
+) -> None:
+    for existing in target:
+        if existing["label"] != label:
+            continue
+        if _bbox_iou(existing["bbox"], bbox) <= 0.5:
+            continue
+        if confidence > existing["confidence"]:
+            existing.update({
+                "bbox": bbox,
+                "confidence": confidence,
+                "crop": crop,
+            })
+        return
+
+    target.append({
+        "label": label,
+        "bbox": bbox,
+        "confidence": confidence,
+        "crop": crop,
+        "context_valid": True,
+        "track_id": -1,
+    })
+
+
+def _run_auxiliary_yolo_world_pass(frame: np.ndarray, rules: list, detections: List[dict]) -> Tuple[List[dict], bool]:
+    detector = get_yolo_world_detector()
+    if not detector.ensure_model():
+        return [], False
+
+    extras: List[dict] = []
+    for rule in rules:
+        terms = secondary_open_vocab_terms(rule, _COCO_CLASSES)
+        if not terms:
+            continue
+
+        primaries = _candidate_primaries_for_rule(rule, detections)
+        for primary in primaries:
+            grouped_terms: Dict[Tuple[int, int, int, int], List[str]] = {}
+            for term in terms:
+                roi_data = _auxiliary_roi_for_term(frame, primary["bbox"], rule.primary, term)
+                if roi_data is None:
+                    continue
+                roi, crop = roi_data
+                grouped_terms.setdefault(tuple(roi), []).append(term)
+
+            for roi_tuple, prompts in grouped_terms.items():
+                rx1, ry1, rx2, ry2 = roi_tuple
+                roi_crop = frame[ry1:ry2, rx1:rx2]
+                prompt_hits = detector.detect(roi_crop, prompts)
+                if not detector.available:
+                    return extras, False
+
+                for term in prompts:
+                    for hit in prompt_hits.get(term, [])[:2]:
+                        local_bbox = hit["bbox"]
+                        bbox = [
+                            rx1 + local_bbox[0],
+                            ry1 + local_bbox[1],
+                            rx1 + local_bbox[2],
+                            ry1 + local_bbox[3],
+                        ]
+                        if not _nearby(primary["bbox"], bbox, getattr(rule, "proximity", 1.5)):
+                            continue
+                        _merge_auxiliary_hit(
+                            extras,
+                            term,
+                            bbox,
+                            hit["confidence"],
+                            frame[bbox[1]:bbox[3], bbox[0]:bbox[2]],
+                        )
+
+    return extras, True
+
+
 def _run_yolo_world_pass(frame: np.ndarray, hard_rules: list) -> Tuple[Dict[str, List[dict]], bool]:
     detector = get_yolo_world_detector()
     prompts = [rule_world_prompt(rule) for rule in hard_rules]
@@ -308,9 +491,14 @@ def video_generator(stream_id: str, video_path: str, fps: float):
                 rule for rule in active_rules
                 if needs_open_vocab_verifier(rule, _COCO_CLASSES)
             ]
+            auxiliary_rules = [
+                rule for rule in active_rules
+                if secondary_open_vocab_terms(rule, _COCO_CLASSES)
+            ]
             hard_rule_ids = {rule.rule_id for rule in hard_rules}
 
             open_vocab_dets: List[dict] = []
+            auxiliary_open_vocab_dets: List[dict] = []
             clip_fallback_dets: List[dict] = []
             if hard_rules:
                 if open_vocab_supported and frame_index % _open_vocab_stride_frames(fps) == 0:
@@ -331,7 +519,16 @@ def video_generator(stream_id: str, video_path: str, fps: float):
                 if not open_vocab_supported:
                     clip_fallback_dets = _clip_augment_detections(frame, pipeline.yolo, hard_rules)
 
-            all_dets = base_dets + open_vocab_dets + clip_fallback_dets
+            if auxiliary_rules and open_vocab_supported:
+                auxiliary_open_vocab_dets, aux_world_available = _run_auxiliary_yolo_world_pass(
+                    frame,
+                    auxiliary_rules,
+                    base_dets + open_vocab_dets,
+                )
+                if not aux_world_available:
+                    open_vocab_supported = False
+
+            all_dets = base_dets + open_vocab_dets + auxiliary_open_vocab_dets + clip_fallback_dets
 
             # 3. CLIP-verify primary detections against each rule's clip_verify text
             #    (tags each det with clip_rule_scores so the engine can filter by colour/context)

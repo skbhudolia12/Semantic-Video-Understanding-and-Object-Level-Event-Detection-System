@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.pipeline.open_vocab_memory import OpenVocabTrackStore, needs_open_vocab_verifier
+from src.pipeline.open_vocab_memory import (
+    OpenVocabTrackStore,
+    needs_open_vocab_verifier,
+    secondary_open_vocab_terms,
+)
 
 
 def _rule(rule_id="r1", primary="bucket", attributes=None, clip_verify="bucket"):
@@ -13,6 +17,9 @@ def _rule(rule_id="r1", primary="bucket", attributes=None, clip_verify="bucket")
         rule_id=rule_id,
         primary=primary,
         attributes=attributes or [],
+        required_nearby=[],
+        absent_nearby=[],
+        proximity=1.5,
         clip_verify=clip_verify,
         display_label=clip_verify.title(),
     )
@@ -95,6 +102,24 @@ class TestOpenVocabRuleSelection(unittest.TestCase):
     def test_plain_coco_rule_stays_on_base_detector(self):
         rule = _rule(primary="person", attributes=[], clip_verify="person")
         self.assertFalse(needs_open_vocab_verifier(rule, {"person", "bottle"}))
+
+    def test_secondary_open_vocab_terms_collects_non_coco_required_and_absent(self):
+        rule = _rule(primary="person", clip_verify="motorcyclist without helmet")
+        rule.required_nearby = ["motorcycle", "helmet"]
+        rule.absent_nearby = ["helmet", "visor"]
+        self.assertEqual(
+            secondary_open_vocab_terms(rule, {"person", "motorcycle"}),
+            ["helmet", "visor"],
+        )
+
+    def test_secondary_open_vocab_terms_skips_primary_and_coco_duplicates(self):
+        rule = _rule(primary="helmet", clip_verify="helmet without visor")
+        rule.required_nearby = ["helmet", "motorcycle"]
+        rule.absent_nearby = ["motorcycle", "visor", "visor"]
+        self.assertEqual(
+            secondary_open_vocab_terms(rule, {"motorcycle"}),
+            ["visor"],
+        )
 
 
 if __name__ == "__main__":

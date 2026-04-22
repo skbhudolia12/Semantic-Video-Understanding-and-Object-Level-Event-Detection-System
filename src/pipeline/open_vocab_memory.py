@@ -218,6 +218,18 @@ def needs_open_vocab_verifier(rule: object, coco_classes: set[str]) -> bool:
     return primary not in coco_classes or bool(attributes)
 
 
+def secondary_open_vocab_terms(rule: object, coco_classes: set[str]) -> List[str]:
+    terms: List[str] = []
+    primary = (getattr(rule, "primary", "") or "").lower().strip()
+    for term in (getattr(rule, "required_nearby", []) or []) + (getattr(rule, "absent_nearby", []) or []):
+        normalized = (term or "").lower().strip()
+        if not normalized or normalized == primary or normalized in coco_classes:
+            continue
+        if normalized not in terms:
+            terms.append(normalized)
+    return terms
+
+
 def rule_world_prompt(rule: object) -> str:
     prompt = (getattr(rule, "clip_verify", "") or "").strip()
     if prompt:
