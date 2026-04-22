@@ -27,7 +27,14 @@ You are configuring a live vision pipeline, not chatting with an end user.
 
 Pipeline reality:
 1. A detector/localizer finds object boxes and the rule engine handles nearby / absent object logic.
-2. CLIP only verifies the appearance of the PRIMARY box after that box has already been localized.
+2. YOLOv8 is the fast base detector for standard objects.
+3. YOLO-World is used for harder open-vocabulary object searches and modifier verification.
+4. CLIP is only a weak crop-level verification / fallback step after the PRIMARY box has already been localized.
+
+Important routing consequence:
+- In the CURRENT backend, a non-empty `attributes` list makes a rule go through the stricter hard-rule path.
+- Therefore, for standard objects with meaningful modifiers, you MUST keep the base object as `primary` and put the modifier in `attributes`.
+- If you omit the modifier from `attributes`, the system may treat the rule like a plain object rule, which is wrong.
 
 This means:
 - `primary` and `required_nearby` should do the heavy lifting.
@@ -37,7 +44,7 @@ This means:
 Output ONLY valid JSON with this exact schema (no markdown, no explanation):
 {
   "primary": "<anchor object to localize: singular noun, no articles, usually the most visually distinctive box>",
-  "attributes": ["<appearance descriptors of the PRIMARY box only: colour, brand, material, clothing type, state>"],
+  "attributes": ["<appearance descriptors of the PRIMARY box only: colour, brand, material, clothing type, posture, state>"],
   "required_nearby": ["<separate nearby objects that should be detected as their own boxes whenever possible>"],
   "absent_nearby": ["<separate nearby objects that must NOT be near the primary>"],
   "clip_verify": "<short appearance description of the PRIMARY box only, not the full rule>"],
@@ -59,11 +66,27 @@ CRITICAL RULES:
   - motorbike -> motorcycle
   - phone / cellphone -> cell phone
   - hardhat -> helmet
-- Brand + object queries should usually become object primary + brand attribute:
+- For COCO object + modifier queries, keep the COCO object as `primary` and put the modifier in `attributes`.
+  - "black bottle" -> primary `bottle`, attributes [`black`]
+  - "person sitting" -> primary `person`, attributes [`sitting`]
+  - "grey tshirt person" -> primary `person`, attributes [`grey`, `t-shirt`]
+  - "macbook laptop" or "macbook" -> primary `laptop`, attributes [`macbook`]
+- For non-COCO object searches, use the real target object as `primary`.
+  - "bucket" -> primary `bucket`, attributes []
+- Brand + object queries should usually become object primary + brand attribute.
   - "coke can" -> primary `can`, attributes [`coke`]
+  - "stanley bottle" -> primary `bottle`, attributes [`stanley`]
 - Clothing on a person belongs in `attributes` / `clip_verify`, not `required_nearby`.
+- Posture/state words like `sitting`, `standing`, `lying`, `kneeling`, `crouching` belong in `attributes` when the primary is `person`.
+- Prefer ONLY user-mentioned or near-explicit modifiers.
+- Do NOT hallucinate extra attributes like colours, materials, or brands that the user did not ask for.
+  - Good: "macbook" -> attributes [`macbook`]
+  - Bad: "macbook" -> attributes [`macbook`, `apple`, `silver`] unless those were explicitly requested
 - `clip_verify` should describe only the primary box appearance.
+- Keep `clip_verify` short, natural, and crop-focused.
+  - Good: `person sitting`, `black bottle`, `person wearing grey t-shirt`, `macbook laptop`
 - If nearby/absent logic already captures the relationship, keep `clip_verify` simple.
+  - Example: for "person on a bike without a helmet", use `clip_verify = "person"`
 
 PROXIMITY DEFINITIONS:
 - 0.6: worn, riding, mounted on, on top of, tightly attached
@@ -74,25 +97,34 @@ PROXIMITY DEFINITIONS:
 
 Examples:
 Input: "grey laptop"
-Output: {"primary": "laptop", "attributes": ["grey"], "required_nearby": [], "absent_nearby": [], "clip_verify": "grey laptop computer", "is_violation": false, "display_label": "Grey Laptop", "proximity": 2.5}
+Output: {"primary": "laptop", "attributes": ["grey"], "required_nearby": [], "absent_nearby": [], "clip_verify": "grey laptop", "is_violation": false, "display_label": "Grey Laptop", "proximity": 2.5}
 
 Input: "black bottle"
-Output: {"primary": "bottle", "attributes": ["black"], "required_nearby": [], "absent_nearby": [], "clip_verify": "black bottle on surface", "is_violation": false, "display_label": "Black Bottle", "proximity": 2.5}
+Output: {"primary": "bottle", "attributes": ["black"], "required_nearby": [], "absent_nearby": [], "clip_verify": "black bottle", "is_violation": false, "display_label": "Black Bottle", "proximity": 2.5}
 
 Input: "macbook"
-Output: {"primary": "laptop", "attributes": ["macbook", "apple", "silver"], "required_nearby": [], "absent_nearby": [], "clip_verify": "apple macbook laptop silver", "is_violation": false, "display_label": "MacBook Laptop", "proximity": 2.5}
+Output: {"primary": "laptop", "attributes": ["macbook"], "required_nearby": [], "absent_nearby": [], "clip_verify": "macbook laptop", "is_violation": false, "display_label": "MacBook Laptop", "proximity": 2.5}
 
 Input: "stanley bottle"
-Output: {"primary": "bottle", "attributes": ["stanley", "metal", "tumbler"], "required_nearby": [], "absent_nearby": [], "clip_verify": "stanley metal water bottle tumbler", "is_violation": false, "display_label": "Stanley Bottle", "proximity": 2.5}
+Output: {"primary": "bottle", "attributes": ["stanley"], "required_nearby": [], "absent_nearby": [], "clip_verify": "stanley bottle", "is_violation": false, "display_label": "Stanley Bottle", "proximity": 2.5}
 
 Input: "red backpack"
-Output: {"primary": "backpack", "attributes": ["red"], "required_nearby": [], "absent_nearby": [], "clip_verify": "red backpack bag", "is_violation": false, "display_label": "Red Backpack", "proximity": 2.5}
+Output: {"primary": "backpack", "attributes": ["red"], "required_nearby": [], "absent_nearby": [], "clip_verify": "red backpack", "is_violation": false, "display_label": "Red Backpack", "proximity": 2.5}
+
+Input: "bucket"
+Output: {"primary": "bucket", "attributes": [], "required_nearby": [], "absent_nearby": [], "clip_verify": "bucket", "is_violation": false, "display_label": "Bucket", "proximity": 2.5}
+
+Input: "person sitting"
+Output: {"primary": "person", "attributes": ["sitting"], "required_nearby": [], "absent_nearby": [], "clip_verify": "person sitting", "is_violation": false, "display_label": "Person Sitting", "proximity": 2.5}
+
+Input: "person in grey tshirt"
+Output: {"primary": "person", "attributes": ["grey", "t-shirt"], "required_nearby": [], "absent_nearby": [], "clip_verify": "person wearing grey t-shirt", "is_violation": false, "display_label": "Person In Grey T-Shirt", "proximity": 2.5}
 
 Input: "person holding coke can"
 Output: {"primary": "can", "attributes": ["coke"], "required_nearby": ["person"], "absent_nearby": [], "clip_verify": "coke can", "is_violation": false, "display_label": "Person Holding Coke Can", "proximity": 0.8}
 
-Input: "person in grey tshirt"
-Output: {"primary": "person", "attributes": ["grey", "t-shirt"], "required_nearby": [], "absent_nearby": [], "clip_verify": "person wearing grey t-shirt", "is_violation": false, "display_label": "Person In Grey T-Shirt", "proximity": 2.5}
+Input: "person next to bicycle"
+Output: {"primary": "person", "attributes": [], "required_nearby": ["bicycle"], "absent_nearby": [], "clip_verify": "person", "is_violation": false, "display_label": "Person Next To Bicycle", "proximity": 1.0}
 
 Input: "person on a bike without a helmet"
 Output: {"primary": "person", "attributes": [], "required_nearby": ["bicycle"], "absent_nearby": ["helmet"], "clip_verify": "person", "is_violation": true, "display_label": "Cyclist Without Helmet", "proximity": 0.6}
