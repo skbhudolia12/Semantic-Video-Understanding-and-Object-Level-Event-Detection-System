@@ -14,6 +14,21 @@ from typing import Dict, List, Tuple
 from openai import OpenAI
 
 _LOG_FILE = Path(__file__).parent.parent.parent / "output" / "gpt_rule_log.jsonl"
+
+_openai_client: OpenAI | None = None
+
+
+def _get_openai_client() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise EnvironmentError(
+                "OPENAI_API_KEY environment variable is not set. "
+                "Set it before starting the server."
+            )
+        _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
 _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -388,14 +403,7 @@ def _normalize_rule_data(text: str, data: dict) -> dict:
 
 def parse_rule(text: str, rule_id: str, color_index: int) -> ParsedRule:
     """Call GPT-4o mini to convert a natural language rule into a ParsedRule."""
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise EnvironmentError(
-            "OPENAI_API_KEY environment variable is not set. "
-            "Set it before starting the server."
-        )
-
-    client = OpenAI(api_key=api_key)
+    client = _get_openai_client()
     message = client.chat.completions.create(
         model="gpt-4o-mini",
         temperature=0,

@@ -3,12 +3,12 @@ rule_engine.py — Thread-safe rule store + per-frame spatial evaluation
 """
 from __future__ import annotations
 
-import math
 import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from src.pipeline.rule_parser import ParsedRule, parse_rule
+from src.utils.spatial import bbox_iou, nearby
 
 
 @dataclass
@@ -33,53 +33,14 @@ class RuleMatch:
         }
 
 
-# ---------------------------------------------------------------------------
-# Spatial helpers — all O(1) per pair, CPU-friendly
-# ---------------------------------------------------------------------------
-
-def _centroid(bbox: List[int]) -> Tuple[float, float]:
-    return (bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0
-
-
-def _box_diag(bbox: List[int]) -> float:
-    w = bbox[2] - bbox[0]
-    h = bbox[3] - bbox[1]
-    return math.sqrt(w * w + h * h)
-
-
-def _iou(a: List[int], b: List[int]) -> float:
-    x1 = max(a[0], b[0])
-    y1 = max(a[1], b[1])
-    x2 = min(a[2], b[2])
-    y2 = min(a[3], b[3])
-    inter = max(0, x2 - x1) * max(0, y2 - y1)
-    area_a = (a[2] - a[0]) * (a[3] - a[1])
-    area_b = (b[2] - b[0]) * (b[3] - b[1])
-    union = area_a + area_b - inter
-    return inter / union if union > 0 else 0.0
-
-
-def _nearby(a: List[int], b: List[int], proximity: float = 1.5) -> bool:
-    """
-    Two boxes are 'nearby' if they overlap (IoU > 0.05) OR their centroids
-    are within proximity × the larger box's diagonal.
-    proximity=1.5 covers adjacent objects (person next to bike);
-    overlap catches containment (person ON bike).
-    """
-    if _iou(a, b) > 0.05:
-        return True
-    ax, ay = _centroid(a)
-    bx, by = _centroid(b)
-    dist = math.sqrt((ax - bx) ** 2 + (ay - by) ** 2)
-    threshold = proximity * max(_box_diag(a), _box_diag(b))
-    return dist < threshold
-
-
 def _label_matches(det_label: str, target: str) -> bool:
-    """Fuzzy label match — handles 'cell phone' vs 'phone', 'bicycle' vs 'bike'."""
+    """Fuzzy label match — handles 'cell phone' vs 'phone', 'bicycle' vs 'bike'.
+    Uses all() for multi-word targets to avoid e.g. 'ball' matching 'basketball'
+    when the target is 'sports ball'.
+    """
     d = det_label.lower().strip()
     t = target.lower().strip()
-    return t in d or d in t or any(w in d for w in t.split())
+    return t in d or d in t or all(w in d for w in t.split())
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +138,7 @@ class RuleEngine:
                 req_dets = [
                     d for d in detections
                     if _label_matches(d.get("label", ""), req)
-                    and _nearby(p_bbox, d["bbox"], prox)
+                    and nearby(p_bbox, d["bbox"], prox)
                 ]
                 if not req_dets:
                     required_ok = False
@@ -190,7 +151,7 @@ class RuleEngine:
             absent_ok = all(
                 not any(
                     _label_matches(d.get("label", ""), absent)
-                    and _nearby(p_bbox, d["bbox"], prox)
+                    and nearby(p_bbox, d["bbox"], prox)
                     for d in detections
                 )
                 for absent in rule.absent_nearby

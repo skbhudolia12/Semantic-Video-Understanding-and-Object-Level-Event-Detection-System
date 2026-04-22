@@ -11,10 +11,8 @@ Architecture overview
   HybridPipeline
   ├── Tier 1 (Fast Path)
   │     YOLOv8 detect_objects() → CLIP match_crops() with attribute expansion
-  │
-  ├── Tier 2 (Fallback — only when Tier 1 finds nothing)
-  │     Batched ONNX clip_scan() with spatial-temporal heatmap skip
-  │     (replaces ~500ms per-crop PyTorch calls with a single ONNX forward pass)
+  │     Note: clip_scan() (sliding-window Tier-2) is available in detector.py
+  │     but is not called by process_frame — the server uses YOLO-World instead.
   │
   ├── TrackerModule (ByteTrack)
   │     Assigns stable integer track_ids across frames; handles occlusions.

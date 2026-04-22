@@ -38,6 +38,8 @@ import cv2
 import numpy as np
 import torch
 
+from src.utils.spatial import bbox_iou
+
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +241,7 @@ def clip_scan(
     candidates.sort(key=lambda c: c["similarity"], reverse=True)
     kept: List[dict] = []
     for cand in candidates:
-        if not any(_iou(cand["bbox"], k["bbox"]) > 0.4 for k in kept):
+        if not any(bbox_iou(cand["bbox"], k["bbox"]) > 0.4 for k in kept):
             color = get_dominant_color(cand["crop"])
             cand["label"]      = query
             cand["confidence"] = cand["prob"]
@@ -250,23 +252,8 @@ def clip_scan(
 
 
 # ---------------------------------------------------------------------------
-# Helpers (unchanged from original)
+# Helpers
 # ---------------------------------------------------------------------------
-
-def _iou(box1: list, box2: list) -> float:
-    """Intersection over Union for two [x1,y1,x2,y2] boxes."""
-    x1 = max(box1[0], box2[0])
-    y1 = max(box1[1], box2[1])
-    x2 = min(box1[2], box2[2])
-    y2 = min(box1[3], box2[3])
-
-    inter = max(0, x2 - x1) * max(0, y2 - y1)
-    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-    union = area1 + area2 - inter
-
-    return inter / union if union > 0 else 0
-
 
 _BOX_BGR = (99, 102, 241)   # indigo — matches the UI accent colour
 _DIM_BGR = (60, 60, 60)     # dim gray for background detections

@@ -50,6 +50,8 @@ class TestOpenVocabTrackStore(unittest.TestCase):
         self.assertEqual(second[0]["open_vocab_state"], "confirmed")
 
     def test_confirmed_track_becomes_stale_then_drops(self):
+        # stale_after_misses=1: one miss while confirmed → stale (misses reset to 0)
+        # drop_after_stale_misses=2: two misses while stale → dropped
         store = OpenVocabTrackStore(confirm_hits=1, stale_after_misses=1, drop_after_stale_misses=2)
         rule = _rule()
 
@@ -71,12 +73,23 @@ class TestOpenVocabTrackStore(unittest.TestCase):
         )
         self.assertEqual(stale[0]["open_vocab_state"], "stale")
 
-        dropped = store.update(
+        # First stale miss — still alive (misses=1 < drop_after_stale_misses=2)
+        still_stale = store.update(
             rules=[rule],
             world_hits_by_rule={"r1": []},
             base_detections=[],
             frame_index=16,
             timestamp=0.5,
+        )
+        self.assertEqual(still_stale[0]["open_vocab_state"], "stale")
+
+        # Second stale miss — now dropped (misses=2 >= drop_after_stale_misses=2)
+        dropped = store.update(
+            rules=[rule],
+            world_hits_by_rule={"r1": []},
+            base_detections=[],
+            frame_index=24,
+            timestamp=0.75,
         )
         self.assertEqual(dropped, [])
 

@@ -29,3 +29,5 @@ scripts/debug_results_copy.txt
 scripts/debug_stanley.txt
 scripts/bottles_*.txt
 scripts/pipeline_output.txt
+
+SESSION_CHANGES.md

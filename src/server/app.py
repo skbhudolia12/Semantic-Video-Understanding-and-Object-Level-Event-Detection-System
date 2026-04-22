@@ -27,6 +27,7 @@ from scripts.run_pipeline import HybridPipeline
 from src.models.yolo_world_model import get_yolo_world_detector
 from src.pipeline.video_stream import stream_frames
 from src.pipeline.detector import draw_rule_results
+from src.utils.spatial import bbox_iou, nearby
 from src.pipeline.open_vocab_memory import (
     OpenVocabTrackStore,
     needs_open_vocab_verifier,
@@ -212,31 +213,6 @@ def _open_vocab_stride_frames(fps: float) -> int:
     return max(8, int(round(max(fps, 1.0) * _OPEN_VOCAB_STRIDE_SECONDS)))
 
 
-def _bbox_iou(a: List[int], b: List[int]) -> float:
-    x1 = max(a[0], b[0])
-    y1 = max(a[1], b[1])
-    x2 = min(a[2], b[2])
-    y2 = min(a[3], b[3])
-    inter = max(0, x2 - x1) * max(0, y2 - y1)
-    area_a = max(0, a[2] - a[0]) * max(0, a[3] - a[1])
-    area_b = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
-    union = area_a + area_b - inter
-    return inter / union if union > 0 else 0.0
-
-
-def _nearby(a: List[int], b: List[int], proximity: float = 1.5) -> bool:
-    if _bbox_iou(a, b) > 0.05:
-        return True
-    ax = (a[0] + a[2]) / 2.0
-    ay = (a[1] + a[3]) / 2.0
-    bx = (b[0] + b[2]) / 2.0
-    by = (b[1] + b[3]) / 2.0
-    dist = ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
-    diag_a = ((a[2] - a[0]) ** 2 + (a[3] - a[1]) ** 2) ** 0.5
-    diag_b = ((b[2] - b[0]) ** 2 + (b[3] - b[1]) ** 2) ** 0.5
-    return dist < proximity * max(diag_a, diag_b)
-
-
 def _expand_bbox(bbox: List[int], frame_shape: tuple[int, int, int], scale_x: float, scale_y: float) -> List[int]:
     h, w = frame_shape[:2]
     x1, y1, x2, y2 = bbox
@@ -302,7 +278,7 @@ def _candidate_primaries_for_rule(rule: object, detections: List[dict]) -> List[
         if all(
             any(
                 _primary_matches(det.get("label", ""), req)
-                and _nearby(primary["bbox"], det["bbox"], prox)
+                and nearby(primary["bbox"], det["bbox"], prox)
                 for det in detections
             )
             for req in available_required_terms
@@ -322,7 +298,7 @@ def _merge_auxiliary_hit(
     for existing in target:
         if existing["label"] != label:
             continue
-        if _bbox_iou(existing["bbox"], bbox) <= 0.5:
+        if bbox_iou(existing["bbox"], bbox) <= 0.5:
             continue
         if confidence > existing["confidence"]:
             existing.update({
@@ -379,7 +355,7 @@ def _run_auxiliary_yolo_world_pass(frame: np.ndarray, rules: list, detections: L
                             rx1 + local_bbox[2],
                             ry1 + local_bbox[3],
                         ]
-                        if not _nearby(primary["bbox"], bbox, getattr(rule, "proximity", 1.5)):
+                        if not nearby(primary["bbox"], bbox, getattr(rule, "proximity", 1.5)):
                             continue
                         _merge_auxiliary_hit(
                             extras,
@@ -468,13 +444,14 @@ def video_generator(stream_id: str, video_path: str, fps: float):
             conf_threshold=0.25,
             sim_threshold=0.25,
             use_tracker=True,
-            use_context_filter=True,
+            use_context_filter=False,  # DeepLabV3 is too costly for live streaming on CPU
             use_neural_compliance=False,
             attribute_matching=False,
             frame_rate=int(fps) or 2,
         )
         open_vocab_store = OpenVocabTrackStore()
         open_vocab_supported = True
+        _aux_cache: List[dict] = []  # cached auxiliary hits reused between strides
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -520,13 +497,18 @@ def video_generator(stream_id: str, video_path: str, fps: float):
                     clip_fallback_dets = _clip_augment_detections(frame, pipeline.yolo, hard_rules)
 
             if auxiliary_rules and open_vocab_supported:
-                auxiliary_open_vocab_dets, aux_world_available = _run_auxiliary_yolo_world_pass(
-                    frame,
-                    auxiliary_rules,
-                    base_dets + open_vocab_dets,
-                )
-                if not aux_world_available:
-                    open_vocab_supported = False
+                if frame_index % _open_vocab_stride_frames(fps) == 0:
+                    fresh_aux_dets, aux_world_available = _run_auxiliary_yolo_world_pass(
+                        frame,
+                        auxiliary_rules,
+                        base_dets + open_vocab_dets,
+                    )
+                    if aux_world_available:
+                        _aux_cache = fresh_aux_dets
+                    else:
+                        open_vocab_supported = False
+                        _aux_cache = []
+                auxiliary_open_vocab_dets = _aux_cache
 
             all_dets = base_dets + open_vocab_dets + auxiliary_open_vocab_dets + clip_fallback_dets
 

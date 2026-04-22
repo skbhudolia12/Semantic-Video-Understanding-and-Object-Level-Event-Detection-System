@@ -3,17 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-
-def _iou(a: List[int], b: List[int]) -> float:
-    x1 = max(a[0], b[0])
-    y1 = max(a[1], b[1])
-    x2 = min(a[2], b[2])
-    y2 = min(a[3], b[3])
-    inter = max(0, x2 - x1) * max(0, y2 - y1)
-    area_a = (a[2] - a[0]) * (a[3] - a[1])
-    area_b = (b[2] - b[0]) * (b[3] - b[1])
-    union = area_a + area_b - inter
-    return inter / union if union > 0 else 0.0
+from src.utils.spatial import bbox_iou
 
 
 @dataclass
@@ -113,7 +103,7 @@ class OpenVocabTrackStore:
             for track in tracks:
                 if track.memory_id in matched_track_ids:
                     continue
-                overlap = _iou(hit["bbox"], track.bbox)
+                overlap = bbox_iou(hit["bbox"], track.bbox)
                 if overlap > best_iou:
                     best_iou = overlap
                     best_track = track
@@ -164,6 +154,7 @@ class OpenVocabTrackStore:
                     continue
                 if track.state == "confirmed" and track.misses >= self._stale_after_misses:
                     track.state = "stale"
+                    track.misses = 0  # count stale-specific misses from zero
                 elif track.state == "stale" and track.misses >= self._drop_after_stale_misses:
                     continue
             kept_tracks.append(track)
@@ -186,7 +177,7 @@ class OpenVocabTrackStore:
             det_label = (det.get("label") or "").lower()
             if rule.primary.lower() not in det_label and det_label not in rule.primary.lower():
                 continue
-            overlap = _iou(bbox, det["bbox"])
+            overlap = bbox_iou(bbox, det["bbox"])
             if overlap > best_iou:
                 best_iou = overlap
                 best_track_id = track_id

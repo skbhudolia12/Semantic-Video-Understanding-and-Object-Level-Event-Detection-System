@@ -1,0 +1,14 @@
+ultralytics
+opencv-python
+torch
+torchvision
+numpy
+pillow
+fastapi
+uvicorn[standard]
+python-multipart
+openai
+python-dotenv
+supervision
+onnxruntime
+clip-by-openai
