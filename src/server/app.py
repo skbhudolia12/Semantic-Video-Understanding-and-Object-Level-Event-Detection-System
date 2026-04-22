@@ -9,7 +9,7 @@ _load_dotenv(_Path(__file__).parent.parent.parent / ".env")
 import os
 import shutil
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -24,8 +24,14 @@ _PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from scripts.run_pipeline import HybridPipeline
+from src.models.yolo_world_model import get_yolo_world_detector
 from src.pipeline.video_stream import stream_frames
 from src.pipeline.detector import draw_rule_results
+from src.pipeline.open_vocab_memory import (
+    OpenVocabTrackStore,
+    needs_open_vocab_verifier,
+    rule_world_prompt,
+)
 from src.pipeline.rule_engine import RuleEngine
 
 # COCO-80 classes — objects NOT in this set need CLIP fallback detection
@@ -46,6 +52,7 @@ _COCO_CLASSES = {
 
 # Per-rule CLIP text embedding cache (avoids re-encoding every frame)
 _clip_text_cache: Dict[str, torch.Tensor] = {}
+_OPEN_VOCAB_STRIDE_SECONDS = 0.27
 
 
 def _clip_augment_detections(
@@ -109,6 +116,8 @@ def _clip_augment_detections(
                 "crop": best_crop,
                 "context_valid": True,
                 "track_id": -1,
+                "verified_rules": [rule.rule_id],
+                "clip_rule_scores": {rule.rule_id: 1.0},
             })
             logging.debug(
                 "CLIP fallback: rule=%s label=%s sim=%.3f",
@@ -123,7 +132,11 @@ def _primary_matches(det_label: str, primary: str) -> bool:
     return p in d or d in p or any(w in d for w in p.split())
 
 
-def _clip_score_primaries(detections: List[dict], rules: list) -> List[dict]:
+def _clip_score_primaries(
+    detections: List[dict],
+    rules: list,
+    open_vocab_rule_ids: set[str] | None = None,
+) -> List[dict]:
     """
     For every detection that is a primary candidate for at least one rule, compute
     CLIP cosine similarity against the rule's clip_verify text and store the score
@@ -137,22 +150,37 @@ def _clip_score_primaries(detections: List[dict], rules: list) -> List[dict]:
     from src.models.clip_model import encode_text
     from src.models.onnx_clip_encoder import get_encoder
 
+    open_vocab_rule_ids = open_vocab_rule_ids or set()
+
     tasks: List[tuple] = []  # (det_idx, [matching ParsedRules])
+    result = [dict(det) for det in detections]
     for i, det in enumerate(detections):
-        crop = det.get("crop")
-        if crop is None or crop.size == 0:
-            continue
         matching = [r for r in rules if _primary_matches(det.get("label", ""), r.primary)]
-        if matching:
-            tasks.append((i, matching))
+        if not matching:
+            continue
+
+        scores = dict(result[i].get("clip_rule_scores", {}))
+        verified_rules = set(result[i].get("verified_rules", []))
+
+        easy_rules = []
+        for rule in matching:
+            if rule.rule_id in open_vocab_rule_ids:
+                scores[rule.rule_id] = 1.0 if rule.rule_id in verified_rules else 0.0
+            else:
+                easy_rules.append(rule)
+
+        result[i]["clip_rule_scores"] = scores
+
+        crop = det.get("crop")
+        if crop is not None and crop.size > 0 and easy_rules:
+            tasks.append((i, easy_rules))
 
     if not tasks:
-        return detections
+        return result
 
     encoder = get_encoder()
     img_embs = encoder.encode_batch([detections[i]["crop"] for i, _ in tasks])
 
-    result = list(detections)
     for emb_idx, (det_idx, matching_rules) in enumerate(tasks):
         det = dict(result[det_idx])
         scores = dict(det.get("clip_rule_scores", {}))
@@ -175,6 +203,34 @@ def _clip_score_primaries(detections: List[dict], rules: list) -> List[dict]:
         result[det_idx] = det
 
     return result
+
+
+def _open_vocab_stride_frames(fps: float) -> int:
+    return max(8, int(round(max(fps, 1.0) * _OPEN_VOCAB_STRIDE_SECONDS)))
+
+
+def _run_yolo_world_pass(frame: np.ndarray, hard_rules: list) -> Tuple[Dict[str, List[dict]], bool]:
+    detector = get_yolo_world_detector()
+    prompts = [rule_world_prompt(rule) for rule in hard_rules]
+    if not prompts:
+        return {}, True
+    if not detector.ensure_model():
+        return {}, False
+
+    prompt_hits = detector.detect(frame, prompts)
+    if not detector.available:
+        return {}, False
+
+    grouped_by_rule: Dict[str, List[dict]] = {rule.rule_id: [] for rule in hard_rules}
+    prompt_to_rules: Dict[str, List[object]] = {}
+    for rule in hard_rules:
+        prompt_to_rules.setdefault(rule_world_prompt(rule), []).append(rule)
+
+    for prompt, hits in prompt_hits.items():
+        for rule in prompt_to_rules.get(prompt, []):
+            grouped_by_rule[rule.rule_id].extend(hits[:3])
+
+    return grouped_by_rule, True
 
 
 app = FastAPI()
@@ -234,26 +290,56 @@ def video_generator(stream_id: str, video_path: str, fps: float):
             attribute_matching=False,
             frame_rate=int(fps) or 2,
         )
+        open_vocab_store = OpenVocabTrackStore()
+        open_vocab_supported = True
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
         v_input = int(video_path) if isinstance(video_path, str) and video_path.isdigit() else video_path
 
-        for frame, timestamp in stream_frames(v_input, sample_fps=fps):
+        for frame_index, (frame, timestamp) in enumerate(stream_frames(v_input, sample_fps=fps)):
             # 1. YOLO + tracker + context filter
             result = pipeline.process_frame(frame, timestamp, query=None)
+            base_dets = list(result.all_detections)
 
-            # 2. CLIP fallback for non-COCO primary objects
             active_rules = rule_engine.get_rules()
-            clip_extras = _clip_augment_detections(
-                frame, pipeline.yolo, active_rules
-            )
-            all_dets = result.all_detections + clip_extras
+            hard_rules = [
+                rule for rule in active_rules
+                if needs_open_vocab_verifier(rule, _COCO_CLASSES)
+            ]
+            hard_rule_ids = {rule.rule_id for rule in hard_rules}
+
+            open_vocab_dets: List[dict] = []
+            clip_fallback_dets: List[dict] = []
+            if hard_rules:
+                if open_vocab_supported and frame_index % _open_vocab_stride_frames(fps) == 0:
+                    grouped_world_hits, world_available = _run_yolo_world_pass(frame, hard_rules)
+                    if world_available:
+                        open_vocab_dets = open_vocab_store.update(
+                            rules=hard_rules,
+                            world_hits_by_rule=grouped_world_hits,
+                            base_detections=base_dets,
+                            frame_index=frame_index,
+                            timestamp=timestamp,
+                        )
+                    else:
+                        open_vocab_supported = False
+                elif open_vocab_supported:
+                    open_vocab_dets = open_vocab_store.get_active_detections(hard_rules)
+
+                if not open_vocab_supported:
+                    clip_fallback_dets = _clip_augment_detections(frame, pipeline.yolo, hard_rules)
+
+            all_dets = base_dets + open_vocab_dets + clip_fallback_dets
 
             # 3. CLIP-verify primary detections against each rule's clip_verify text
             #    (tags each det with clip_rule_scores so the engine can filter by colour/context)
-            all_dets = _clip_score_primaries(all_dets, active_rules)
+            all_dets = _clip_score_primaries(
+                all_dets,
+                active_rules,
+                open_vocab_rule_ids=hard_rule_ids,
+            )
 
             # 4. Evaluate all active rules against augmented + verified detections
             rule_matches = rule_engine.evaluate(all_dets)
@@ -270,6 +356,7 @@ def video_generator(stream_id: str, video_path: str, fps: float):
                         "track_id": int(d.get("track_id", -1)),
                         "bbox": d.get("bbox"),
                         "context_valid": bool(d.get("context_valid", True)),
+                        "state": d.get("open_vocab_state", "confirmed"),
                     }
                     for d in all_dets
                 ],
